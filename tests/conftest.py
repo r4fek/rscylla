@@ -12,11 +12,11 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from rsylla import Session, SessionBuilder
+    from rsylla import Session
 
-    RSCYLLA_AVAILABLE = True
+    RSYLLA_AVAILABLE = True
 except ImportError:
-    RSCYLLA_AVAILABLE = False
+    RSYLLA_AVAILABLE = False
 
 
 def pytest_configure(config):
@@ -47,7 +47,7 @@ def scylla_connection_string(scylla_host, scylla_port):
 @pytest.fixture(scope="session")
 async def wait_for_scylla(scylla_connection_string):
     """Wait for ScyllaDB to be ready"""
-    if not RSCYLLA_AVAILABLE:
+    if not RSYLLA_AVAILABLE:
         pytest.skip("rsylla not available - run 'maturin develop' first")
 
     max_retries = 60
