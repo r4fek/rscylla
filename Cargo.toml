@@ -8,11 +8,11 @@ name = "rscylla"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py311"] }
-pyo3-async-runtimes = { version = "0.22", features = ["tokio-runtime"] }
+pyo3 = { version = "0.27", features = ["extension-module", "abi3-py311"] }
+pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
 scylla = "1.4.1"
-tokio = { version = "1", features = ["full"] }
-futures = "0.3"
-uuid = { version = "1.0", features = ["v4"] }
-chrono = "0.4"
-num-bigint = "0.4"
+tokio = { version = "1.48", features = ["full"] }
+futures = "0.3.31"
+uuid = { version = "1.18", features = ["v4"] }
+chrono = "0.4.42"
+num-bigint = "0.4.6"

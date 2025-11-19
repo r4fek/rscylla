@@ -131,7 +131,7 @@ impl PreparedStatement {
     }
 
     pub fn get_id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        Ok(PyBytes::new_bound(py, self.prepared.get_id()))
+        Ok(PyBytes::new(py, self.prepared.get_id()))
     }
 
     pub fn get_statement(&self) -> String {

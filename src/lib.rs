@@ -28,7 +28,7 @@ fn _rscylla(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Batch>()?;
 
     // Exception
-    m.add("ScyllaError", _py.get_type_bound::<ScyllaError>())?;
+    m.add("ScyllaError", _py.get_type::<ScyllaError>())?;
 
     Ok(())
 }

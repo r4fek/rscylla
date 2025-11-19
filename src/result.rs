@@ -31,8 +31,8 @@ impl QueryResult {
 
 #[pymethods]
 impl QueryResult {
-    pub fn rows(&self, py: Python) -> PyResult<PyObject> {
-        let py_list = PyList::empty_bound(py);
+    pub fn rows(&self, py: Python) -> PyResult<Py<PyAny>> {
+        let py_list = PyList::empty(py);
 
         if let Some(ref rows_result) = self.rows_result {
             let rows: Vec<ScyllaRow> = rows_result
@@ -57,7 +57,7 @@ impl QueryResult {
             }
         }
 
-        Ok(py_list.to_object(py))
+        Ok(py_list.into())
     }
 
     pub fn first_row(&self) -> PyResult<Option<Row>> {
@@ -122,7 +122,7 @@ impl QueryResult {
         }
     }
 
-    pub fn first_row_typed(&self, py: Python) -> PyResult<Option<PyObject>> {
+    pub fn first_row_typed(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         if let Some(ref rows_result) = self.rows_result {
             let mut rows_iter = rows_result.rows().map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
@@ -148,7 +148,7 @@ impl QueryResult {
         }
     }
 
-    pub fn rows_typed(&self, py: Python) -> PyResult<Vec<PyObject>> {
+    pub fn rows_typed(&self, py: Python) -> PyResult<Vec<Py<PyAny>>> {
         let mut result = Vec::new();
 
         if let Some(ref rows_result) = self.rows_result {
@@ -177,13 +177,13 @@ impl QueryResult {
         Ok(result)
     }
 
-    pub fn col_specs(&self, py: Python) -> PyResult<PyObject> {
-        let py_list = PyList::empty_bound(py);
+    pub fn col_specs(&self, py: Python) -> PyResult<Py<PyAny>> {
+        let py_list = PyList::empty(py);
 
         if let Some(ref rows_result) = self.rows_result {
             let specs = rows_result.column_specs();
             for spec in specs.iter() {
-                let dict = PyDict::new_bound(py);
+                let dict = PyDict::new(py);
                 dict.set_item("table_spec", format!("{:?}", spec.table_spec()))?;
                 dict.set_item("name", spec.name().to_string())?;
                 dict.set_item("typ", format!("{:?}", spec.typ()))?;
@@ -191,7 +191,7 @@ impl QueryResult {
             }
         }
 
-        Ok(py_list.to_object(py))
+        Ok(py_list.into())
     }
 
     pub fn tracing_id(&self) -> Option<String> {
@@ -253,8 +253,8 @@ impl Row {
 
 #[pymethods]
 impl Row {
-    pub fn columns(&self, py: Python) -> PyResult<PyObject> {
-        let py_list = PyList::empty_bound(py);
+    pub fn columns(&self, py: Python) -> PyResult<Py<PyAny>> {
+        let py_list = PyList::empty(py);
         for column in &self.columns {
             let value = match column {
                 Some(val) => cql_value_to_py(py, val)?,
@@ -262,11 +262,11 @@ impl Row {
             };
             py_list.append(value)?;
         }
-        Ok(py_list.to_object(py))
+        Ok(py_list.into())
     }
 
-    pub fn as_dict(&self, py: Python) -> PyResult<PyObject> {
-        let dict = PyDict::new_bound(py);
+    pub fn as_dict(&self, py: Python) -> PyResult<Py<PyAny>> {
+        let dict = PyDict::new(py);
 
         // Note: In a real implementation, you'd need column names from the result metadata
         // For now, we'll use indices as keys
@@ -278,10 +278,10 @@ impl Row {
             dict.set_item(format!("col_{}", i), value)?;
         }
 
-        Ok(dict.to_object(py))
+        Ok(dict.into())
     }
 
-    pub fn get(&self, py: Python, index: usize) -> PyResult<PyObject> {
+    pub fn get(&self, py: Python, index: usize) -> PyResult<Py<PyAny>> {
         if index < self.columns.len() {
             match &self.columns[index] {
                 Some(val) => cql_value_to_py(py, val),
@@ -299,7 +299,7 @@ impl Row {
         self.columns.len()
     }
 
-    pub fn __getitem__(&self, py: Python, index: isize) -> PyResult<PyObject> {
+    pub fn __getitem__(&self, py: Python, index: isize) -> PyResult<Py<PyAny>> {
         let len = self.columns.len() as isize;
         let idx = if index < 0 {
             (len + index) as usize

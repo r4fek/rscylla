@@ -220,7 +220,7 @@ impl Session {
 
         let mut batch_values = Vec::new();
         for item in values.iter() {
-            if let Ok(dict) = item.downcast::<PyDict>() {
+            if let Ok(dict) = item.cast::<PyDict>() {
                 let serialized = py_dict_to_serialized_values(Some(dict))?;
                 batch_values.push(serialized);
             } else {

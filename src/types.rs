@@ -1,64 +1,65 @@
+use pyo3::conversion::IntoPyObjectExt;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use scylla::value::CqlValue;
 use std::collections::HashMap;
 
-pub fn cql_value_to_py(py: Python, value: &CqlValue) -> PyResult<PyObject> {
+pub fn cql_value_to_py(py: Python, value: &CqlValue) -> PyResult<Py<PyAny>> {
     match value {
-        CqlValue::Ascii(s) | CqlValue::Text(s) => Ok(s.to_object(py)),
-        CqlValue::Boolean(b) => Ok(b.to_object(py)),
-        CqlValue::Int(i) => Ok(i.to_object(py)),
-        CqlValue::BigInt(i) => Ok(i.to_object(py)),
-        CqlValue::SmallInt(i) => Ok(i.to_object(py)),
-        CqlValue::TinyInt(i) => Ok(i.to_object(py)),
-        CqlValue::Counter(c) => Ok(c.0.to_object(py)),
-        CqlValue::Float(f) => Ok(f.to_object(py)),
-        CqlValue::Double(d) => Ok(d.to_object(py)),
-        CqlValue::Blob(b) => Ok(PyBytes::new_bound(py, b).to_object(py)),
-        CqlValue::Uuid(u) => Ok(u.to_string().to_object(py)),
-        CqlValue::Timeuuid(t) => Ok(t.to_string().to_object(py)),
-        CqlValue::Inet(addr) => Ok(addr.to_string().to_object(py)),
+        CqlValue::Ascii(s) | CqlValue::Text(s) => Ok(s.clone().into_bound_py_any(py)?.into()),
+        CqlValue::Boolean(b) => Ok((*b).into_bound_py_any(py)?.into()),
+        CqlValue::Int(i) => Ok((*i).into_bound_py_any(py)?.into()),
+        CqlValue::BigInt(i) => Ok((*i).into_bound_py_any(py)?.into()),
+        CqlValue::SmallInt(i) => Ok((*i).into_bound_py_any(py)?.into()),
+        CqlValue::TinyInt(i) => Ok((*i).into_bound_py_any(py)?.into()),
+        CqlValue::Counter(c) => Ok(c.0.into_bound_py_any(py)?.into()),
+        CqlValue::Float(f) => Ok((*f).into_bound_py_any(py)?.into()),
+        CqlValue::Double(d) => Ok((*d).into_bound_py_any(py)?.into()),
+        CqlValue::Blob(b) => Ok(PyBytes::new(py, b).into()),
+        CqlValue::Uuid(u) => Ok(u.to_string().into_bound_py_any(py)?.into()),
+        CqlValue::Timeuuid(t) => Ok(t.to_string().into_bound_py_any(py)?.into()),
+        CqlValue::Inet(addr) => Ok(addr.to_string().into_bound_py_any(py)?.into()),
         CqlValue::List(list) => {
-            let py_list = PyList::empty_bound(py);
+            let py_list = PyList::empty(py);
             for item in list {
                 py_list.append(cql_value_to_py(py, item)?)?;
             }
-            Ok(py_list.to_object(py))
+            Ok(py_list.into())
         }
         CqlValue::Set(set) => {
-            let py_list = PyList::empty_bound(py);
+            let py_list = PyList::empty(py);
             for item in set {
                 py_list.append(cql_value_to_py(py, item)?)?;
             }
-            Ok(py_list.to_object(py))
+            Ok(py_list.into())
         }
         CqlValue::Map(map) => {
-            let py_dict = PyDict::new_bound(py);
+            let py_dict = PyDict::new(py);
             for (key, val) in map {
                 py_dict.set_item(cql_value_to_py(py, key)?, cql_value_to_py(py, val)?)?;
             }
-            Ok(py_dict.to_object(py))
+            Ok(py_dict.into())
         }
-        CqlValue::Timestamp(ts) => Ok(ts.0.to_object(py)),
-        CqlValue::Date(d) => Ok(d.0.to_object(py)),
-        CqlValue::Time(t) => Ok(t.0.to_object(py)),
+        CqlValue::Timestamp(ts) => Ok(ts.0.into_bound_py_any(py)?.into()),
+        CqlValue::Date(d) => Ok(d.0.into_bound_py_any(py)?.into()),
+        CqlValue::Time(t) => Ok(t.0.into_bound_py_any(py)?.into()),
         CqlValue::Duration(d) => {
-            let dict = PyDict::new_bound(py);
+            let dict = PyDict::new(py);
             dict.set_item("months", d.months)?;
             dict.set_item("days", d.days)?;
             dict.set_item("nanoseconds", d.nanoseconds)?;
-            Ok(dict.to_object(py))
+            Ok(dict.into())
         }
         CqlValue::Varint(v) => {
             // CqlVarint - use Debug representation since fields are private
-            Ok(format!("{:?}", v).to_object(py))
+            Ok(format!("{:?}", v).into_bound_py_any(py)?.into())
         }
         CqlValue::Decimal(d) => {
             // CqlDecimal - use Debug representation since fields are private
-            Ok(format!("{:?}", d).to_object(py))
+            Ok(format!("{:?}", d).into_bound_py_any(py)?.into())
         }
         CqlValue::Tuple(tuple) => {
-            let py_list = PyList::empty_bound(py);
+            let py_list = PyList::empty(py);
             for item in tuple {
                 if let Some(val) = item {
                     py_list.append(cql_value_to_py(py, val)?)?;
@@ -66,10 +67,10 @@ pub fn cql_value_to_py(py: Python, value: &CqlValue) -> PyResult<PyObject> {
                     py_list.append(py.None())?;
                 }
             }
-            Ok(py_list.to_object(py))
+            Ok(py_list.into())
         }
         CqlValue::UserDefinedType { fields, .. } => {
-            let py_dict = PyDict::new_bound(py);
+            let py_dict = PyDict::new(py);
             for (name, value) in fields {
                 if let Some(val) = value {
                     py_dict.set_item(name, cql_value_to_py(py, val)?)?;
@@ -77,12 +78,12 @@ pub fn cql_value_to_py(py: Python, value: &CqlValue) -> PyResult<PyObject> {
                     py_dict.set_item(name, py.None())?;
                 }
             }
-            Ok(py_dict.to_object(py))
+            Ok(py_dict.into())
         }
         CqlValue::Empty => Ok(py.None()),
         _ => {
             // Handle any additional variants that may be added in the future
-            Ok(format!("{:?}", value).to_object(py))
+            Ok(format!("{:?}", value).into_bound_py_any(py)?.into())
         }
     }
 }
@@ -121,7 +122,7 @@ pub fn py_to_cql_value(obj: &Bound<'_, PyAny>) -> PyResult<CqlValue> {
         return Ok(CqlValue::Blob(b));
     }
 
-    if let Ok(list) = obj.downcast::<PyList>() {
+    if let Ok(list) = obj.cast::<PyList>() {
         let mut values = Vec::new();
         for item in list.iter() {
             values.push(py_to_cql_value(&item)?);
@@ -129,7 +130,7 @@ pub fn py_to_cql_value(obj: &Bound<'_, PyAny>) -> PyResult<CqlValue> {
         return Ok(CqlValue::List(values));
     }
 
-    if let Ok(dict) = obj.downcast::<PyDict>() {
+    if let Ok(dict) = obj.cast::<PyDict>() {
         let mut map = Vec::new();
         for (key, val) in dict.iter() {
             map.push((py_to_cql_value(&key)?, py_to_cql_value(&val)?));
@@ -308,7 +309,7 @@ fn py_value_to_serializable(val: &Bound<'_, PyAny>) -> PyResult<SerializableValu
     }
 
     // Try list
-    if let Ok(list) = val.downcast::<PyList>() {
+    if let Ok(list) = val.cast::<PyList>() {
         let mut items = Vec::new();
         for item in list.iter() {
             items.push(py_value_to_serializable(&item)?);
@@ -317,7 +318,7 @@ fn py_value_to_serializable(val: &Bound<'_, PyAny>) -> PyResult<SerializableValu
     }
 
     // Try dict (as map)
-    if let Ok(dict) = val.downcast::<PyDict>() {
+    if let Ok(dict) = val.cast::<PyDict>() {
         // Try to detect if it's a text map or int map
         let mut text_map: HashMap<String, String> = HashMap::new();
         let mut int_map: HashMap<String, i64> = HashMap::new();
