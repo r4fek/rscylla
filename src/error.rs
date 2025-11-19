@@ -13,10 +13,12 @@ pub fn session_error_to_py(err: scylla::transport::errors::NewSessionError) -> P
     PyErr::new::<ScyllaError, _>(format!("Session error: {}", err))
 }
 
+#[allow(dead_code)]
 pub fn serialization_error_to_py(err: scylla::serialize::SerializationError) -> PyErr {
     PyErr::new::<ScyllaError, _>(format!("Serialization error: {}", err))
 }
 
+#[allow(dead_code)]
 pub fn deserialization_error_to_py(err: scylla::deserialize::DeserializationError) -> PyErr {
     PyErr::new::<ScyllaError, _>(format!("Deserialization error: {}", err))
 }

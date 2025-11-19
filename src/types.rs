@@ -2,10 +2,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use scylla::frame::response::result::CqlValue;
 use scylla::frame::value::LegacySerializedValues;
-use scylla::serialize::row::SerializedValues;
-use scylla::serialize::value::SerializeValue;
-use scylla::serialize::writers::WrittenCellProof;
-use scylla::serialize::CellWriter;
 use std::collections::HashMap;
 
 pub fn cql_value_to_py(py: Python, value: &CqlValue) -> PyResult<PyObject> {
@@ -88,6 +84,7 @@ pub fn cql_value_to_py(py: Python, value: &CqlValue) -> PyResult<PyObject> {
     }
 }
 
+#[allow(dead_code)]
 pub fn py_to_cql_value(obj: &Bound<'_, PyAny>) -> PyResult<CqlValue> {
     if obj.is_none() {
         return Ok(CqlValue::Empty);
@@ -143,6 +140,7 @@ pub fn py_to_cql_value(obj: &Bound<'_, PyAny>) -> PyResult<CqlValue> {
     )))
 }
 
+#[allow(dead_code)]
 pub fn py_dict_to_values(dict: Option<&Bound<'_, PyDict>>) -> PyResult<HashMap<String, CqlValue>> {
     let mut values = HashMap::new();
 

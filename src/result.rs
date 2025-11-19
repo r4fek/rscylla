@@ -37,7 +37,7 @@ impl QueryResult {
 
     pub fn first_row(&self) -> PyResult<Option<Row>> {
         if let Some(rows) = &self.result.rows {
-            Ok(rows.first().map(|r| Row::new(r)))
+            Ok(rows.first().map(Row::new))
         } else {
             Ok(None)
         }

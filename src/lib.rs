@@ -1,3 +1,6 @@
+#![allow(unexpected_cfgs)]
+#![allow(clippy::useless_conversion)]
+
 use pyo3::prelude::*;
 
 mod batch;

@@ -9,10 +9,10 @@ use crate::batch::Batch;
 use crate::error::{query_error_to_py, session_error_to_py};
 use crate::query::{PreparedStatement, Query};
 use crate::result::QueryResult;
-use crate::types::{py_dict_to_serialized_values, py_dict_to_values};
+use crate::types::py_dict_to_serialized_values;
 
 #[pyclass]
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct SessionBuilder {
     builder: ScyllaSessionBuilder,
 }
@@ -21,9 +21,7 @@ pub struct SessionBuilder {
 impl SessionBuilder {
     #[new]
     pub fn new() -> Self {
-        SessionBuilder {
-            builder: ScyllaSessionBuilder::new(),
-        }
+        Self::default()
     }
 
     pub fn known_node(&mut self, hostname: &str) -> PyResult<Self> {
