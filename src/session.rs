@@ -1,12 +1,16 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3_async_runtimes::tokio::future_into_py;
-use scylla::{Session as ScyllaSession, SessionBuilder as ScyllaSessionBuilder};
+use scylla::client::session::Session as ScyllaSession;
+use scylla::client::session_builder::SessionBuilder as ScyllaSessionBuilder;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::batch::Batch;
-use crate::error::{query_error_to_py, session_error_to_py};
+use crate::error::{
+    prepare_error_to_py, query_error_to_py, schema_agreement_error_to_py, session_error_to_py,
+    use_keyspace_error_to_py,
+};
 use crate::query::{PreparedStatement, Query};
 use crate::result::QueryResult;
 use crate::types::py_dict_to_serialized_values;
@@ -58,7 +62,7 @@ impl SessionBuilder {
         self.builder = self
             .builder
             .clone()
-            .pool_size(scylla::transport::session::PoolSize::PerHost(non_zero_size));
+            .pool_size(scylla::client::PoolSize::PerHost(non_zero_size));
         Ok(self.clone())
     }
 
@@ -70,8 +74,8 @@ impl SessionBuilder {
     #[pyo3(signature = (compression=None))]
     pub fn compression(&mut self, compression: Option<&str>) -> PyResult<Self> {
         let comp = match compression {
-            Some("lz4") => Some(scylla::transport::Compression::Lz4),
-            Some("snappy") => Some(scylla::transport::Compression::Snappy),
+            Some("lz4") => Some(scylla::client::Compression::Lz4),
+            Some("snappy") => Some(scylla::client::Compression::Snappy),
             None => None,
             _ => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -175,7 +179,7 @@ impl Session {
             let prepared = session
                 .prepare(query_str)
                 .await
-                .map_err(query_error_to_py)?;
+                .map_err(prepare_error_to_py)?;
 
             Ok(PreparedStatement {
                 prepared: Arc::new(prepared),
@@ -247,7 +251,7 @@ impl Session {
             session
                 .use_keyspace(ks, case_sensitive)
                 .await
-                .map_err(query_error_to_py)?;
+                .map_err(use_keyspace_error_to_py)?;
 
             Ok(())
         })
@@ -260,7 +264,7 @@ impl Session {
             session
                 .await_schema_agreement()
                 .await
-                .map_err(query_error_to_py)?;
+                .map_err(schema_agreement_error_to_py)?;
 
             // Return True when schema agreement is reached
             Ok(true)

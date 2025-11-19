@@ -1,7 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
-use scylla::frame::response::result::CqlValue;
-use scylla::frame::value::LegacySerializedValues;
+use scylla::value::CqlValue;
 use std::collections::HashMap;
 
 pub fn cql_value_to_py(py: Python, value: &CqlValue) -> PyResult<PyObject> {
@@ -81,6 +80,10 @@ pub fn cql_value_to_py(py: Python, value: &CqlValue) -> PyResult<PyObject> {
             Ok(py_dict.to_object(py))
         }
         CqlValue::Empty => Ok(py.None()),
+        _ => {
+            // Handle any additional variants that may be added in the future
+            Ok(format!("{:?}", value).to_object(py))
+        }
     }
 }
 
@@ -154,166 +157,214 @@ pub fn py_dict_to_values(dict: Option<&Bound<'_, PyDict>>) -> PyResult<HashMap<S
     Ok(values)
 }
 
+// Helper type that can hold different value types for serialization
+#[derive(Debug, Clone)]
+pub enum SerializableValue {
+    Null,
+    Bool(bool),
+    Int(i32),
+    BigInt(i64),
+    Float(f32),
+    Double(f64),
+    Text(String),
+    Blob(Vec<u8>),
+    Timestamp(chrono::DateTime<chrono::Utc>),
+    List(Vec<SerializableValue>),
+    #[allow(dead_code)]
+    Set(Vec<SerializableValue>),
+    // For maps, we use simpler types that scylla can handle directly
+    TextMap(HashMap<String, String>),
+    IntMap(HashMap<String, i64>),
+}
+
+impl scylla::serialize::value::SerializeValue for SerializableValue {
+    fn serialize<'b>(
+        &self,
+        _typ: &scylla::frame::response::result::ColumnType,
+        writer: scylla::serialize::writers::CellWriter<'b>,
+    ) -> Result<
+        scylla::serialize::writers::WrittenCellProof<'b>,
+        scylla::serialize::SerializationError,
+    > {
+        match self {
+            SerializableValue::Null => {
+                <Option<i32> as scylla::serialize::value::SerializeValue>::serialize(
+                    &None, _typ, writer,
+                )
+            }
+            SerializableValue::Bool(b) => b.serialize(_typ, writer),
+            SerializableValue::Int(i) => i.serialize(_typ, writer),
+            SerializableValue::BigInt(i) => i.serialize(_typ, writer),
+            SerializableValue::Float(f) => f.serialize(_typ, writer),
+            SerializableValue::Double(f) => f.serialize(_typ, writer),
+            SerializableValue::Text(s) => s.serialize(_typ, writer),
+            SerializableValue::Blob(b) => b.serialize(_typ, writer),
+            SerializableValue::Timestamp(dt) => {
+                // Convert to CqlTimestamp (milliseconds since epoch)
+                let timestamp = scylla::value::CqlTimestamp(dt.timestamp_millis());
+                timestamp.serialize(_typ, writer)
+            }
+            SerializableValue::List(items) => items.serialize(_typ, writer),
+            SerializableValue::Set(items) => {
+                // Sets are serialized as lists in scylla
+                items.serialize(_typ, writer)
+            }
+            SerializableValue::TextMap(map) => map.serialize(_typ, writer),
+            SerializableValue::IntMap(map) => map.serialize(_typ, writer),
+        }
+    }
+}
+
 pub fn py_dict_to_serialized_values(
     dict: Option<&Bound<'_, PyDict>>,
-) -> PyResult<LegacySerializedValues> {
-    let mut serialized = LegacySerializedValues::new();
+) -> PyResult<HashMap<String, SerializableValue>> {
+    let mut serialized = HashMap::new();
 
     if let Some(d) = dict {
-        // Extract all keys and values while preserving Python dict order
-        // Use keys() and get_item() to preserve order since PyDict.iter() doesn't guarantee order
-        let keys = d.call_method0("keys")?;
+        for (key, val) in d.iter() {
+            let key_str = key.extract::<String>()?;
 
-        for key_obj_result in keys.iter()? {
-            let key_obj = key_obj_result?;
-            let key_str = key_obj.extract::<String>()?;
-            let val = d.get_item(&key_str)?.ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                    "Key '{}' not found",
-                    key_str
-                ))
-            })?;
+            // Convert Python value to SerializableValue
+            let scylla_val = py_value_to_serializable(&val)?;
 
-            // Serialize based on Python type
-            if val.is_none() {
-                serialized
-                    .add_named_value(&key_str, &Option::<i32>::None)
-                    .map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Serialization error: {}",
-                            e
-                        ))
-                    })?;
-            } else if let Ok(b) = val.extract::<bool>() {
-                serialized.add_named_value(&key_str, &b).map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "Serialization error: {}",
-                        e
-                    ))
-                })?;
-            } else if let Ok(i) = val.extract::<i64>() {
-                // Use i32 for small integers, i64 for large ones
-                // This works for most cases; bigint/counter columns may need explicit i64 via prepared statements
-                if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
-                    serialized
-                        .add_named_value(&key_str, &(i as i32))
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "Serialization error: {}",
-                                e
-                            ))
-                        })?;
-                } else {
-                    serialized.add_named_value(&key_str, &i).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Serialization error: {}",
-                            e
-                        ))
-                    })?;
-                }
-            } else if let Ok(f) = val.extract::<f64>() {
-                // Use f32 for normal floats, f64 for doubles
-                let f32_val = f as f32;
-                if f.is_finite() && f.abs() <= f32::MAX as f64 && (f32_val as f64 - f).abs() < 1e-6
-                {
-                    serialized
-                        .add_named_value(&key_str, &f32_val)
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "Serialization error: {}",
-                                e
-                            ))
-                        })?;
-                } else {
-                    serialized.add_named_value(&key_str, &f).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Serialization error: {}",
-                            e
-                        ))
-                    })?;
-                }
-            } else if let Ok(s) = val.extract::<String>() {
-                serialized.add_named_value(&key_str, &s).map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "Serialization error: {}",
-                        e
-                    ))
-                })?;
-            } else if let Ok(b) = val.extract::<Vec<u8>>() {
-                serialized.add_named_value(&key_str, &b).map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "Serialization error: {}",
-                        e
-                    ))
-                })?;
-            } else if let Ok(dict) = val.downcast::<PyDict>() {
-                // Handle nested dict (map type) - try String->String first
-                let mut string_map: HashMap<String, String> = HashMap::new();
-                let mut all_strings = true;
-
-                for (k, v) in dict.iter() {
-                    if let (Ok(map_key), Ok(map_value)) =
-                        (k.extract::<String>(), v.extract::<String>())
-                    {
-                        string_map.insert(map_key, map_value);
-                    } else {
-                        all_strings = false;
-                        break;
-                    }
-                }
-
-                if all_strings && !string_map.is_empty() {
-                    serialized
-                        .add_named_value(&key_str, &string_map)
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "Serialization error: {}",
-                                e
-                            ))
-                        })?;
-                } else {
-                    // Try i64 map
-                    let mut int_map: HashMap<String, i64> = HashMap::new();
-                    for (k, v) in dict.iter() {
-                        if let (Ok(map_key), Ok(map_value)) =
-                            (k.extract::<String>(), v.extract::<i64>())
-                        {
-                            int_map.insert(map_key, map_value);
-                        }
-                    }
-                    serialized
-                        .add_named_value(&key_str, &int_map)
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "Serialization error: {}",
-                                e
-                            ))
-                        })?;
-                }
-            } else if let Ok(list) = val.downcast::<PyList>() {
-                let mut vec_values: Vec<String> = Vec::new();
-                for list_item in list.iter() {
-                    if let Ok(s) = list_item.extract::<String>() {
-                        vec_values.push(s);
-                    }
-                }
-                serialized
-                    .add_named_value(&key_str, &vec_values)
-                    .map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Serialization error: {}",
-                            e
-                        ))
-                    })?;
-            } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-                    "Cannot serialize Python type for key '{}': {:?}",
-                    key_str,
-                    val.get_type()
-                )));
-            }
+            serialized.insert(key_str, scylla_val);
         }
     }
 
     Ok(serialized)
+}
+
+fn py_value_to_serializable(val: &Bound<'_, PyAny>) -> PyResult<SerializableValue> {
+    if val.is_none() {
+        return Ok(SerializableValue::Null);
+    }
+
+    // Try bool first (before int, as bool is a subclass of int in Python)
+    if let Ok(b) = val.extract::<bool>() {
+        return Ok(SerializableValue::Bool(b));
+    }
+
+    // Try int types
+    if let Ok(i) = val.extract::<i32>() {
+        return Ok(SerializableValue::Int(i));
+    }
+    if let Ok(i) = val.extract::<i64>() {
+        // Check if this might be a timestamp - timestamps are usually in milliseconds or seconds since epoch
+        // Milliseconds: 1000000000000 to 4102444800000 (year 2001 to 2100)
+        // Seconds: 1000000000 to 4102444800 (year 2001 to 2100)
+        if (1_000_000_000_000..4_102_444_800_000).contains(&i)
+            || (1_000_000_000..4_102_444_800).contains(&i)
+        {
+            // Convert to datetime
+            use chrono::TimeZone;
+            let (secs, nanos) = if i >= 1_000_000_000_000 {
+                // Milliseconds
+                (i / 1000, ((i % 1000) * 1_000_000) as u32)
+            } else {
+                // Seconds
+                (i, 0)
+            };
+            let dt = chrono::Utc
+                .timestamp_opt(secs, nanos)
+                .single()
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid timestamp value")
+                })?;
+            return Ok(SerializableValue::Timestamp(dt));
+        }
+        return Ok(SerializableValue::BigInt(i));
+    }
+
+    // Try float types
+    if let Ok(f) = val.extract::<f32>() {
+        return Ok(SerializableValue::Float(f));
+    }
+    if let Ok(f) = val.extract::<f64>() {
+        // Check if this is a timestamp (common pattern in Python with datetime.timestamp())
+        // If it's a reasonable timestamp value (between 1970 and 2100), treat it as timestamp
+        if f > 0.0 && f < 4_102_444_800.0 {
+            // Between 1970 and 2100
+            // Convert to datetime
+            use chrono::TimeZone;
+            let dt = chrono::Utc
+                .timestamp_opt(f as i64, (f.fract() * 1_000_000_000.0) as u32)
+                .single()
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid timestamp value")
+                })?;
+            return Ok(SerializableValue::Timestamp(dt));
+        }
+        return Ok(SerializableValue::Double(f));
+    }
+
+    // Try string
+    if let Ok(s) = val.extract::<String>() {
+        return Ok(SerializableValue::Text(s));
+    }
+
+    // Try bytes/blob
+    if let Ok(b) = val.extract::<Vec<u8>>() {
+        return Ok(SerializableValue::Blob(b));
+    }
+
+    // Try list
+    if let Ok(list) = val.downcast::<PyList>() {
+        let mut items = Vec::new();
+        for item in list.iter() {
+            items.push(py_value_to_serializable(&item)?);
+        }
+        return Ok(SerializableValue::List(items));
+    }
+
+    // Try dict (as map)
+    if let Ok(dict) = val.downcast::<PyDict>() {
+        // Try to detect if it's a text map or int map
+        let mut text_map: HashMap<String, String> = HashMap::new();
+        let mut int_map: HashMap<String, i64> = HashMap::new();
+        let mut is_text_map = true;
+        let mut is_int_map = true;
+
+        for (k, v) in dict.iter() {
+            let key_str = k.extract::<String>().ok();
+
+            if let Some(key) = &key_str {
+                if is_text_map {
+                    if let Ok(val_str) = v.extract::<String>() {
+                        text_map.insert(key.clone(), val_str);
+                    } else {
+                        is_text_map = false;
+                    }
+                }
+
+                if is_int_map {
+                    if let Ok(val_int) = v.extract::<i64>() {
+                        int_map.insert(key.clone(), val_int);
+                    } else {
+                        is_int_map = false;
+                    }
+                }
+            } else {
+                is_text_map = false;
+                is_int_map = false;
+            }
+
+            if !is_text_map && !is_int_map {
+                break;
+            }
+        }
+
+        if is_text_map && !text_map.is_empty() {
+            return Ok(SerializableValue::TextMap(text_map));
+        } else if is_int_map && !int_map.is_empty() {
+            return Ok(SerializableValue::IntMap(int_map));
+        }
+
+        // If neither worked, return an empty text map as fallback
+        return Ok(SerializableValue::TextMap(HashMap::new()));
+    }
+
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "Cannot serialize Python type: {:?}",
+        val.get_type()
+    )))
 }

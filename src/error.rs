@@ -5,12 +5,24 @@ create_exception!(rscylla, ScyllaError, pyo3::exceptions::PyException);
 
 // Helper functions to convert scylla errors to PyErr
 // We can't implement From directly due to orphan rules
-pub fn query_error_to_py(err: scylla::transport::errors::QueryError) -> PyErr {
+pub fn query_error_to_py(err: scylla::errors::ExecutionError) -> PyErr {
     PyErr::new::<ScyllaError, _>(format!("Query error: {}", err))
 }
 
-pub fn session_error_to_py(err: scylla::transport::errors::NewSessionError) -> PyErr {
+pub fn session_error_to_py(err: scylla::errors::NewSessionError) -> PyErr {
     PyErr::new::<ScyllaError, _>(format!("Session error: {}", err))
+}
+
+pub fn prepare_error_to_py(err: scylla::errors::PrepareError) -> PyErr {
+    PyErr::new::<ScyllaError, _>(format!("Prepare error: {}", err))
+}
+
+pub fn use_keyspace_error_to_py(err: scylla::errors::UseKeyspaceError) -> PyErr {
+    PyErr::new::<ScyllaError, _>(format!("Use keyspace error: {}", err))
+}
+
+pub fn schema_agreement_error_to_py(err: scylla::errors::SchemaAgreementError) -> PyErr {
+    PyErr::new::<ScyllaError, _>(format!("Schema agreement error: {}", err))
 }
 
 #[allow(dead_code)]

@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use scylla::prepared_statement::PreparedStatement as ScyllaPreparedStatement;
-use scylla::query::Query as ScyllaQuery;
+use scylla::statement::prepared::PreparedStatement as ScyllaPreparedStatement;
+use scylla::statement::unprepared::Statement as ScyllaQuery;
 use std::sync::Arc;
 use std::time::Duration;
 

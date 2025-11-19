@@ -1,20 +1,29 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use scylla::frame::response::result::{CqlValue, Row as ScyllaRow};
-use scylla::QueryResult as ScyllaQueryResult;
+use scylla::response::query_result::{QueryResult as ScyllaQueryResult, QueryRowsResult};
+use scylla::value::{CqlValue, Row as ScyllaRow};
 
 use crate::types::cql_value_to_py;
 
 #[pyclass]
 pub struct QueryResult {
-    result: ScyllaQueryResult,
+    // Store the rows result if available
+    rows_result: Option<QueryRowsResult>,
+    tracing_id: Option<String>,
+    warnings: Vec<String>,
     current_row: usize,
 }
 
 impl QueryResult {
     pub fn new(result: ScyllaQueryResult) -> Self {
+        let tracing_id = result.tracing_id().map(|id| id.to_string());
+        let warnings: Vec<String> = result.warnings().map(|s| s.to_string()).collect();
+        let rows_result = result.into_rows_result().ok();
+
         QueryResult {
-            result,
+            rows_result,
+            tracing_id,
+            warnings,
             current_row: 0,
         }
     }
@@ -23,30 +32,83 @@ impl QueryResult {
 #[pymethods]
 impl QueryResult {
     pub fn rows(&self, py: Python) -> PyResult<PyObject> {
-        if let Some(rows) = &self.result.rows {
-            let py_list = PyList::empty_bound(py);
+        let py_list = PyList::empty_bound(py);
+
+        if let Some(ref rows_result) = self.rows_result {
+            let rows: Vec<ScyllaRow> = rows_result
+                .rows()
+                .map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Row deserialization error: {}",
+                        e
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Row deserialization error: {}",
+                        e
+                    ))
+                })?;
+
             for row in rows {
-                let py_row = Py::new(py, Row::new(row))?;
+                let py_row = Py::new(py, Row::new(&row))?;
                 py_list.append(py_row)?;
             }
-            Ok(py_list.to_object(py))
-        } else {
-            Ok(PyList::empty_bound(py).to_object(py))
         }
+
+        Ok(py_list.to_object(py))
     }
 
     pub fn first_row(&self) -> PyResult<Option<Row>> {
-        if let Some(rows) = &self.result.rows {
-            Ok(rows.first().map(Row::new))
+        if let Some(ref rows_result) = self.rows_result {
+            let mut rows_iter = rows_result.rows().map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Row deserialization error: {}",
+                    e
+                ))
+            })?;
+
+            if let Some(row_result) = rows_iter.next() {
+                let row: ScyllaRow = row_result.map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Row deserialization error: {}",
+                        e
+                    ))
+                })?;
+                Ok(Some(Row::new(&row)))
+            } else {
+                Ok(None)
+            }
         } else {
             Ok(None)
         }
     }
 
     pub fn single_row(&self) -> PyResult<Row> {
-        if let Some(rows) = &self.result.rows {
+        if let Some(ref rows_result) = self.rows_result {
+            let rows: Vec<ScyllaRow> = rows_result
+                .rows()
+                .map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Row deserialization error: {}",
+                        e
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Row deserialization error: {}",
+                        e
+                    ))
+                })?;
+
             if rows.len() == 1 {
                 Ok(Row::new(&rows[0]))
+            } else if rows.is_empty() {
+                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "No rows returned",
+                ))
             } else {
                 Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "Expected single row, got {} rows",
@@ -61,9 +123,22 @@ impl QueryResult {
     }
 
     pub fn first_row_typed(&self, py: Python) -> PyResult<Option<PyObject>> {
-        if let Some(rows) = &self.result.rows {
-            if let Some(row) = rows.first() {
-                let py_row = Row::new(row);
+        if let Some(ref rows_result) = self.rows_result {
+            let mut rows_iter = rows_result.rows().map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Row deserialization error: {}",
+                    e
+                ))
+            })?;
+
+            if let Some(row_result) = rows_iter.next() {
+                let row: ScyllaRow = row_result.map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Row deserialization error: {}",
+                        e
+                    ))
+                })?;
+                let py_row = Row::new(&row);
                 Ok(Some(py_row.as_dict(py)?))
             } else {
                 Ok(None)
@@ -74,39 +149,57 @@ impl QueryResult {
     }
 
     pub fn rows_typed(&self, py: Python) -> PyResult<Vec<PyObject>> {
-        if let Some(rows) = &self.result.rows {
-            let mut result = Vec::new();
+        let mut result = Vec::new();
+
+        if let Some(ref rows_result) = self.rows_result {
+            let rows: Vec<ScyllaRow> = rows_result
+                .rows()
+                .map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Row deserialization error: {}",
+                        e
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Row deserialization error: {}",
+                        e
+                    ))
+                })?;
+
             for row in rows {
-                let py_row = Row::new(row);
+                let py_row = Row::new(&row);
                 result.push(py_row.as_dict(py)?);
             }
-            Ok(result)
-        } else {
-            Ok(Vec::new())
         }
+
+        Ok(result)
     }
 
     pub fn col_specs(&self, py: Python) -> PyResult<PyObject> {
-        let specs = self.result.col_specs();
         let py_list = PyList::empty_bound(py);
 
-        for spec in specs {
-            let dict = PyDict::new_bound(py);
-            dict.set_item("table_spec", format!("{:?}", spec.table_spec))?;
-            dict.set_item("name", spec.name.clone())?;
-            dict.set_item("typ", format!("{:?}", spec.typ))?;
-            py_list.append(dict)?;
+        if let Some(ref rows_result) = self.rows_result {
+            let specs = rows_result.column_specs();
+            for spec in specs.iter() {
+                let dict = PyDict::new_bound(py);
+                dict.set_item("table_spec", format!("{:?}", spec.table_spec()))?;
+                dict.set_item("name", spec.name().to_string())?;
+                dict.set_item("typ", format!("{:?}", spec.typ()))?;
+                py_list.append(dict)?;
+            }
         }
 
         Ok(py_list.to_object(py))
     }
 
     pub fn tracing_id(&self) -> Option<String> {
-        self.result.tracing_id.map(|id| id.to_string())
+        self.tracing_id.clone()
     }
 
     pub fn warnings(&self) -> Vec<String> {
-        self.result.warnings.clone()
+        self.warnings.clone()
     }
 
     pub fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
@@ -114,25 +207,33 @@ impl QueryResult {
     }
 
     pub fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<Row> {
-        if let Some(rows) = &slf.result.rows {
-            if slf.current_row < rows.len() {
-                let row = Row::new(&rows[slf.current_row]);
-                slf.current_row += 1;
-                Some(row)
-            } else {
-                None
+        if let Some(ref rows_result) = slf.rows_result {
+            if let Ok(rows) = rows_result.rows::<ScyllaRow>() {
+                let rows_vec: Vec<ScyllaRow> = rows.filter_map(|r| r.ok()).collect();
+                if slf.current_row < rows_vec.len() {
+                    let row = Row::new(&rows_vec[slf.current_row]);
+                    slf.current_row += 1;
+                    return Some(row);
+                }
             }
-        } else {
-            None
         }
+        None
     }
 
     pub fn __len__(&self) -> usize {
-        self.result.rows.as_ref().map(|r| r.len()).unwrap_or(0)
+        if let Some(ref rows_result) = self.rows_result {
+            rows_result.rows_num()
+        } else {
+            0
+        }
     }
 
     pub fn __bool__(&self) -> bool {
-        self.result.rows.is_some() && !self.result.rows.as_ref().unwrap().is_empty()
+        if let Some(ref rows_result) = self.rows_result {
+            rows_result.rows_num() > 0
+        } else {
+            false
+        }
     }
 }
 

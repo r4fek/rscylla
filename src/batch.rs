@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use scylla::batch::Batch as ScyllaBatch;
+use scylla::statement::batch::Batch as ScyllaBatch;
 use scylla::statement::Consistency;
 
 use crate::query::{PreparedStatement, Query};
@@ -16,9 +16,9 @@ impl Batch {
     #[pyo3(signature = (batch_type="logged"))]
     pub fn new(batch_type: &str) -> PyResult<Self> {
         let btype = match batch_type.to_lowercase().as_str() {
-            "logged" => scylla::batch::BatchType::Logged,
-            "unlogged" => scylla::batch::BatchType::Unlogged,
-            "counter" => scylla::batch::BatchType::Counter,
+            "logged" => scylla::statement::batch::BatchType::Logged,
+            "unlogged" => scylla::statement::batch::BatchType::Unlogged,
+            "counter" => scylla::statement::batch::BatchType::Counter,
             _ => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                     "Invalid batch type. Must be 'logged', 'unlogged', or 'counter'",
