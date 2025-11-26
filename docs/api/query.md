@@ -1,479 +1,476 @@
-# Query API Reference
+# Query API
+
+The Query and PreparedStatement classes allow you to configure query execution options like consistency levels, timeouts, and paging.
 
 ## Query
 
-### Overview
-
-`Query` represents a CQL query with configurable execution options.
+The `Query` class represents a CQL query with configurable execution options.
 
 ### Constructor
 
-```python
-query = Query(query_string)
-```
-
-**Parameters:**
-- `query_string`: CQL query string
-
-**Example:**
 ```python
 from rsylla import Query
 
 query = Query("SELECT * FROM users WHERE id = ?")
 ```
 
+**Parameters:**
+
+- `query` - CQL query string
+
 ### Methods
 
 #### `with_consistency(consistency: str) -> Query`
 
-Sets the consistency level for the query.
+Set the consistency level for this query.
 
-**Parameters:**
-- `consistency`: Consistency level name
-
-**Valid Values:**
-- `"ANY"` - Write to at least one node
-- `"ONE"` - Read/write one replica
-- `"TWO"` - Read/write two replicas
-- `"THREE"` - Read/write three replicas
-- `"QUORUM"` - Read/write quorum of replicas
-- `"ALL"` - Read/write all replicas
-- `"LOCAL_QUORUM"` - Quorum in local datacenter
-- `"EACH_QUORUM"` - Quorum in each datacenter
-- `"LOCAL_ONE"` - One replica in local datacenter
-
-**Returns:** Self for method chaining
-
-**Example:**
 ```python
 query = Query("SELECT * FROM users").with_consistency("QUORUM")
 ```
 
-#### `with_serial_consistency(serial_consistency: str) -> Query`
-
-Sets the serial consistency for lightweight transactions.
-
 **Parameters:**
-- `serial_consistency`: Serial consistency level
 
-**Valid Values:**
-- `"SERIAL"` - Serial consistency across all datacenters
-- `"LOCAL_SERIAL"` - Serial consistency in local datacenter
+- `consistency` - One of: `ANY`, `ONE`, `TWO`, `THREE`, `QUORUM`, `ALL`, `LOCAL_QUORUM`, `EACH_QUORUM`, `LOCAL_ONE`
+
+**Raises:** `ValueError` for invalid consistency level
 
 **Returns:** Self for method chaining
 
-**Example:**
+---
+
+#### `with_serial_consistency(serial_consistency: str) -> Query`
+
+Set the serial consistency level (for lightweight transactions).
+
 ```python
 query = (
-    Query("INSERT INTO users (id, name) VALUES (?, ?) IF NOT EXISTS")
-    .with_serial_consistency("LOCAL_SERIAL")
+    Query("UPDATE users SET email = ? WHERE id = ? IF EXISTS")
+    .with_serial_consistency("SERIAL")
 )
 ```
 
-#### `with_page_size(page_size: int) -> Query`
-
-Sets the page size for result pagination.
-
 **Parameters:**
-- `page_size`: Number of rows per page
+
+- `serial_consistency` - One of: `SERIAL`, `LOCAL_SERIAL`
+
+**Raises:** `ValueError` for invalid serial consistency
 
 **Returns:** Self for method chaining
 
-**Example:**
+---
+
+#### `with_page_size(page_size: int) -> Query`
+
+Set the page size for result pagination.
+
 ```python
 query = Query("SELECT * FROM large_table").with_page_size(1000)
 ```
 
-#### `with_timestamp(timestamp: int) -> Query`
-
-Sets the timestamp for the query (in microseconds).
-
 **Parameters:**
-- `timestamp`: Timestamp in microseconds since epoch
+
+- `page_size` - Number of rows per page
 
 **Returns:** Self for method chaining
 
-**Example:**
-```python
-import time
+---
 
-timestamp_micros = int(time.time() * 1000000)
+#### `with_timestamp(timestamp: int) -> Query`
+
+Set a specific timestamp for the query.
+
+```python
 query = (
-    Query("INSERT INTO events (id, data) VALUES (?, ?)")
-    .with_timestamp(timestamp_micros)
+    Query("INSERT INTO users (id, name) VALUES (?, ?)")
+    .with_timestamp(1234567890000)  # Microseconds
 )
 ```
 
-#### `with_timeout(timeout_ms: int) -> Query`
-
-Sets the request timeout.
-
 **Parameters:**
-- `timeout_ms`: Timeout in milliseconds
+
+- `timestamp` - Timestamp in microseconds
 
 **Returns:** Self for method chaining
 
-**Example:**
+---
+
+#### `with_timeout(timeout_ms: int) -> Query`
+
+Set a timeout for the query.
+
 ```python
 query = Query("SELECT * FROM users").with_timeout(5000)  # 5 seconds
 ```
 
-#### `with_tracing(tracing: bool) -> Query`
-
-Enables or disables query tracing.
-
 **Parameters:**
-- `tracing`: True to enable tracing
+
+- `timeout_ms` - Timeout in milliseconds
 
 **Returns:** Self for method chaining
 
-**Example:**
+---
+
+#### `with_tracing(tracing: bool) -> Query`
+
+Enable or disable query tracing.
+
 ```python
 query = Query("SELECT * FROM users").with_tracing(True)
-
-result = session.query(query)
-if result.tracing_id():
-    print(f"Trace ID: {result.tracing_id()}")
 ```
+
+**Parameters:**
+
+- `tracing` - `True` to enable tracing
+
+**Returns:** Self for method chaining
+
+!!! warning "Performance Impact"
+    Tracing has overhead. Only enable for debugging.
+
+---
 
 #### `is_idempotent() -> bool`
 
-Checks if the query is marked as idempotent.
+Check if the query is marked as idempotent.
 
-**Returns:** True if idempotent
-
-**Example:**
 ```python
-if query.is_idempotent():
-    print("Query can be safely retried")
+query = Query("SELECT * FROM users")
+print(query.is_idempotent())  # False by default
 ```
+
+**Returns:** `True` if query is idempotent
+
+---
 
 #### `set_idempotent(idempotent: bool) -> None`
 
-Sets whether the query is idempotent.
+Mark the query as idempotent (safe to retry).
 
-**Parameters:**
-- `idempotent`: True if query is idempotent
-
-**Example:**
 ```python
 query = Query("SELECT * FROM users")
 query.set_idempotent(True)
 ```
 
+**Parameters:**
+
+- `idempotent` - `True` if query is safe to retry
+
+---
+
 #### `get_contents() -> str`
 
-Returns the query string.
+Get the query string.
 
-**Returns:** CQL query string
-
-**Example:**
 ```python
-query_str = query.get_contents()
-print(f"Executing: {query_str}")
+query = Query("SELECT * FROM users")
+print(query.get_contents())  # "SELECT * FROM users"
 ```
 
-### Complete Examples
+**Returns:** The CQL query string
 
-#### Read Query with Options
+---
+
+### Complete Example
 
 ```python
-from rsylla import Session, Query
+from rsylla import Query
 
-session = Session.connect(["127.0.0.1:9042"])
-session.use_keyspace("myapp", False)
-
-# Configure read query
+# Create query with all options
 query = (
     Query("SELECT * FROM users WHERE status = ?")
     .with_consistency("LOCAL_QUORUM")
-    .with_page_size(100)
+    .with_page_size(500)
     .with_timeout(10000)
-    .with_tracing(True)
 )
-
 query.set_idempotent(True)
 
-result = session.query(query, {"status": "active"})
-
-print(f"Found {len(result)} users")
-if result.tracing_id():
-    print(f"Trace: {result.tracing_id()}")
-```
-
-#### Write Query with Timestamp
-
-```python
-import time
-from rsylla import Query
-
-# Create query with custom timestamp
-timestamp = int(time.time() * 1000000)
-
-query = (
-    Query("INSERT INTO events (id, timestamp, data) VALUES (?, ?, ?)")
-    .with_consistency("QUORUM")
-    .with_timestamp(timestamp)
-)
-
-session.query(query, {
-    "id": 123,
-    "timestamp": timestamp // 1000,  # Convert to millis for column
-    "data": "event data"
-})
-```
-
-#### Conditional Write (LWT)
-
-```python
-# Lightweight transaction with serial consistency
-query = (
-    Query("UPDATE users SET balance = ? WHERE id = ? IF balance = ?")
-    .with_consistency("QUORUM")
-    .with_serial_consistency("SERIAL")
-)
-
-result = session.query(query, {
-    "balance": 1000,
-    "id": 123,
-    "balance": 500  # Condition
-})
-
-# Check if conditional update succeeded
-if result.first_row():
-    applied = result.first_row()[0]  # [applied] column
-    if applied:
-        print("Update successful")
-    else:
-        print("Condition not met")
+# Execute
+result = await session.query(query, {"status": "active"})
 ```
 
 ---
 
 ## PreparedStatement
 
-### Overview
+`PreparedStatement` represents a pre-compiled CQL statement for optimal performance.
 
-`PreparedStatement` represents a prepared query that can be executed multiple times efficiently.
+### Creating Prepared Statements
 
-### Creation
-
-Prepared statements are created using `Session.prepare()`:
+Prepared statements are created using `session.prepare()`:
 
 ```python
-prepared = session.prepare("INSERT INTO users (id, name, email) VALUES (?, ?, ?)")
+prepared = await session.prepare(
+    "INSERT INTO users (id, name, email) VALUES (?, ?, ?)"
+)
 ```
 
 ### Methods
 
 #### `with_consistency(consistency: str) -> PreparedStatement`
 
-Sets the consistency level.
+Set the consistency level.
+
+```python
+prepared = await session.prepare("SELECT * FROM users WHERE id = ?")
+prepared = prepared.with_consistency("QUORUM")
+```
 
 **Parameters:**
-- `consistency`: Consistency level name (same as Query)
 
-**Returns:** New PreparedStatement with updated configuration
+- `consistency` - Consistency level string
 
-**Example:**
-```python
-prepared = prepared.with_consistency("LOCAL_QUORUM")
-```
+**Returns:** New `PreparedStatement` with updated settings
+
+---
 
 #### `with_serial_consistency(serial_consistency: str) -> PreparedStatement`
 
-Sets the serial consistency level.
+Set the serial consistency level.
 
-**Parameters:**
-- `serial_consistency`: Serial consistency level
-
-**Returns:** New PreparedStatement with updated configuration
-
-**Example:**
 ```python
 prepared = prepared.with_serial_consistency("LOCAL_SERIAL")
 ```
 
+**Parameters:**
+
+- `serial_consistency` - Serial consistency level string
+
+**Returns:** New `PreparedStatement` with updated settings
+
+---
+
 #### `with_page_size(page_size: int) -> PreparedStatement`
 
-Sets the page size.
+Set the page size.
+
+```python
+prepared = prepared.with_page_size(1000)
+```
 
 **Parameters:**
-- `page_size`: Number of rows per page
 
-**Returns:** New PreparedStatement with updated configuration
+- `page_size` - Number of rows per page
 
-**Example:**
-```python
-prepared = prepared.with_page_size(500)
-```
+**Returns:** New `PreparedStatement` with updated settings
+
+---
 
 #### `with_timestamp(timestamp: int) -> PreparedStatement`
 
-Sets the timestamp.
+Set a specific timestamp.
+
+```python
+prepared = prepared.with_timestamp(1234567890000)
+```
 
 **Parameters:**
-- `timestamp`: Timestamp in microseconds
 
-**Returns:** New PreparedStatement with updated configuration
+- `timestamp` - Timestamp in microseconds
 
-**Example:**
-```python
-prepared = prepared.with_timestamp(int(time.time() * 1000000))
-```
+**Returns:** New `PreparedStatement` with updated settings
+
+---
 
 #### `with_tracing(tracing: bool) -> PreparedStatement`
 
-Enables or disables tracing.
+Enable or disable tracing.
 
-**Parameters:**
-- `tracing`: True to enable tracing
-
-**Returns:** New PreparedStatement with updated configuration
-
-**Example:**
 ```python
 prepared = prepared.with_tracing(True)
 ```
 
+**Parameters:**
+
+- `tracing` - `True` to enable tracing
+
+**Returns:** New `PreparedStatement` with updated settings
+
+---
+
 #### `is_idempotent() -> bool`
 
-Checks if the statement is idempotent.
+Check if the statement is idempotent.
 
-**Returns:** True if idempotent
+```python
+if prepared.is_idempotent():
+    print("Safe to retry")
+```
+
+**Returns:** `True` if statement is idempotent
+
+---
 
 #### `set_idempotent(idempotent: bool) -> PreparedStatement`
 
-Sets idempotency.
+Mark the statement as idempotent.
 
-**Parameters:**
-- `idempotent`: True if idempotent
-
-**Returns:** New PreparedStatement with updated configuration
-
-**Example:**
 ```python
 prepared = prepared.set_idempotent(True)
 ```
 
+**Parameters:**
+
+- `idempotent` - `True` if safe to retry
+
+**Returns:** New `PreparedStatement` with updated settings
+
+---
+
 #### `get_id() -> bytes`
 
-Returns the prepared statement ID.
+Get the prepared statement ID.
 
-**Returns:** Statement ID as bytes
-
-**Example:**
 ```python
 stmt_id = prepared.get_id()
 print(f"Statement ID: {stmt_id.hex()}")
 ```
 
+**Returns:** Statement ID as bytes
+
+---
+
 #### `get_statement() -> str`
 
-Returns the query string.
+Get the original query string.
 
-**Returns:** CQL query string
-
-**Example:**
 ```python
-query_str = prepared.get_statement()
-print(f"Prepared: {query_str}")
+print(prepared.get_statement())
+# "INSERT INTO users (id, name, email) VALUES (?, ?, ?)"
 ```
 
-### Complete Examples
+**Returns:** The CQL query string
 
-#### Efficient Bulk Insert
+---
+
+### Usage Patterns
+
+#### Prepare Once, Execute Many
 
 ```python
-from rsylla import Session
-
-session = Session.connect(["127.0.0.1:9042"])
-session.use_keyspace("myapp", False)
-
-# Prepare once
-prepared = session.prepare(
-    "INSERT INTO products (id, name, price, quantity) VALUES (?, ?, ?, ?)"
-)
-
-# Configure for optimal performance
-prepared = (
-    prepared
-    .with_consistency("ONE")
-    .set_idempotent(True)
+# Prepare statement once
+insert_stmt = await session.prepare(
+    "INSERT INTO users (id, name, email) VALUES (?, ?, ?)"
 )
 
 # Execute many times
-products = [
-    {"id": 1, "name": "Laptop", "price": 999.99, "quantity": 10},
-    {"id": 2, "name": "Mouse", "price": 29.99, "quantity": 100},
-    {"id": 3, "name": "Keyboard", "price": 79.99, "quantity": 50},
-    # ... thousands more
-]
-
-for product in products:
-    session.execute_prepared(prepared, product)
+for user in users:
+    await session.execute_prepared(insert_stmt, {
+        "id": user["id"],
+        "name": user["name"],
+        "email": user["email"]
+    })
 ```
 
-#### Prepared Statement with TTL
+#### Statement Repository
 
 ```python
-# Prepare statement with TTL
-prepared = session.prepare(
-    "INSERT INTO sessions (session_id, user_id, data) VALUES (?, ?, ?) USING TTL ?"
-)
+class UserRepository:
+    """Repository with prepared statements"""
 
-# Execute with 1 hour TTL
-session.execute_prepared(prepared, {
-    "session_id": "abc123",
-    "user_id": 456,
-    "data": "session data",
-    "ttl": 3600  # 1 hour in seconds
-})
+    def __init__(self, session):
+        self.session = session
+        self._prepared = False
+
+    async def _ensure_prepared(self):
+        if self._prepared:
+            return
+
+        self.insert_stmt = await self.session.prepare(
+            "INSERT INTO users (id, name, email) VALUES (?, ?, ?)"
+        )
+
+        self.get_stmt = await self.session.prepare(
+            "SELECT * FROM users WHERE id = ?"
+        )
+        self.get_stmt = self.get_stmt.set_idempotent(True)
+
+        self.update_stmt = await self.session.prepare(
+            "UPDATE users SET email = ? WHERE id = ?"
+        )
+
+        self._prepared = True
+
+    async def create_user(self, user_id, name, email):
+        await self._ensure_prepared()
+        await self.session.execute_prepared(self.insert_stmt, {
+            "id": user_id,
+            "name": name,
+            "email": email
+        })
+
+    async def get_user(self, user_id):
+        await self._ensure_prepared()
+        result = await self.session.execute_prepared(
+            self.get_stmt,
+            {"id": user_id}
+        )
+        return result.first_row()
 ```
 
-#### Read with Prepared Statement
+---
+
+## Consistency Levels
+
+### Standard Consistency
+
+| Level | Description | Use Case |
+|-------|-------------|----------|
+| `ANY` | Write succeeds if any node acknowledges | Fire-and-forget writes |
+| `ONE` | One replica responds | Low latency reads/writes |
+| `TWO` | Two replicas respond | Higher durability |
+| `THREE` | Three replicas respond | Maximum durability |
+| `QUORUM` | Majority of replicas | Strong consistency |
+| `ALL` | All replicas respond | Strictest consistency |
+| `LOCAL_QUORUM` | Majority in local DC | Multi-DC deployments |
+| `EACH_QUORUM` | Majority in each DC | Multi-DC strong consistency |
+| `LOCAL_ONE` | One replica in local DC | Low latency in multi-DC |
+
+### Serial Consistency (LWT)
+
+| Level | Description |
+|-------|-------------|
+| `SERIAL` | Paxos consensus across all DCs |
+| `LOCAL_SERIAL` | Paxos consensus in local DC |
+
+### Choosing Consistency
 
 ```python
-# Prepare read query
-prepared = session.prepare(
-    "SELECT name, email, created_at FROM users WHERE id = ?"
+# High availability reads
+read_query = Query("SELECT ...").with_consistency("LOCAL_ONE")
+
+# Durable writes
+write_query = Query("INSERT ...").with_consistency("LOCAL_QUORUM")
+
+# Strong consistency (read-your-writes)
+# Write with QUORUM, read with QUORUM
+
+# Lightweight transactions
+lwt_query = (
+    Query("UPDATE ... IF EXISTS")
+    .with_consistency("QUORUM")
+    .with_serial_consistency("SERIAL")
 )
-
-# Configure
-prepared = (
-    prepared
-    .with_consistency("LOCAL_ONE")
-    .with_page_size(1)
-    .set_idempotent(True)
-)
-
-# Execute multiple times
-user_ids = [1, 2, 3, 4, 5]
-
-for user_id in user_ids:
-    result = session.execute_prepared(prepared, {"id": user_id})
-    row = result.first_row()
-    if row:
-        name, email, created_at = row[0], row[1], row[2]
-        print(f"User: {name} ({email})")
 ```
 
-#### Reusing Prepared Statement Configuration
+---
+
+## Tracing
+
+Use tracing to debug slow queries:
 
 ```python
-# Base prepared statement
-base_insert = session.prepare("INSERT INTO logs (id, timestamp, message) VALUES (?, ?, ?)")
+query = Query("SELECT * FROM users").with_tracing(True)
+result = await session.query(query)
 
-# Create variants with different configurations
-fast_insert = base_insert.with_consistency("ANY")
-safe_insert = base_insert.with_consistency("QUORUM")
-traced_insert = base_insert.with_tracing(True)
+trace_id = result.tracing_id()
+if trace_id:
+    print(f"Trace ID: {trace_id}")
 
-# Use appropriate variant
-if urgent:
-    session.execute_prepared(fast_insert, log_data)
-elif critical:
-    session.execute_prepared(safe_insert, log_data)
-else:
-    session.execute_prepared(traced_insert, log_data)
+    # Query trace details
+    trace_result = await session.execute(
+        """SELECT * FROM system_traces.sessions
+           WHERE session_id = ?""",
+        {"session_id": trace_id}
+    )
+    print(trace_result.first_row())
 ```

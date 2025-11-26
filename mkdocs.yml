@@ -1,0 +1,107 @@
+site_name: rsylla
+site_description: The fastest Python driver for ScyllaDB - High-performance Python bindings using the official scylla-rust-driver
+site_author: r4fek
+site_url: https://r4fek.github.io/rsylla/
+repo_name: r4fek/rsylla
+repo_url: https://github.com/r4fek/rsylla
+edit_uri: edit/main/docs/
+
+copyright: Copyright &copy; 2025 Rafał Furmański
+
+theme:
+  name: material
+  language: en
+  palette:
+    - scheme: default
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Roboto
+    code: Roboto Mono
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+    - content.code.annotation
+    - content.code.copy
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search
+  - minify:
+      minify_html: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/r4fek/rsylla
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/rsylla/
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+  - pymdownx.mark
+  - pymdownx.keys
+  - admonition
+  - footnotes
+  - tables
+  - attr_list
+  - md_in_html
+  - def_list
+  - toc:
+      permalink: true
+      toc_depth: 3
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quickstart.md
+    - Tutorial: getting-started/tutorial.md
+  - User Guide:
+    - Data Types: guide/data-types.md
+    - Best Practices: guide/best-practices.md
+    - Advanced Patterns: guide/advanced-patterns.md
+  - API Reference:
+    - Overview: api/overview.md
+    - Session: api/session.md
+    - Query: api/query.md
+    - Batch: api/batch.md
+    - Results: api/results.md
+    - Errors: api/errors.md
+  - Examples:
+    - Basic Usage: examples/basic.md
+    - Prepared Statements: examples/prepared-statements.md
+    - Batch Operations: examples/batch-operations.md
+    - Real-World Patterns: examples/real-world.md
+  - Performance:
+    - Benchmarks: performance/benchmarks.md
+    - Optimization Tips: performance/optimization.md
+  - Contributing: contributing.md
+  - Changelog: changelog.md
