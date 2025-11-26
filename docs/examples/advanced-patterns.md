@@ -5,43 +5,47 @@ This document demonstrates advanced patterns and real-world use cases for rsylla
 ## 1. Multi-Tenant Application
 
 ```python
+import asyncio
 from rsylla import Session, SessionBuilder
-import threading
 
 class MultiTenantDatabase:
     """Database handler for multi-tenant application"""
 
-    def __init__(self, nodes):
-        self.session = (
+    def __init__(self, session: Session):
+        self.session = session
+        self._tenant_stmts: dict = {}
+        self._lock = asyncio.Lock()
+
+    @classmethod
+    async def create(cls, nodes: list[str]) -> "MultiTenantDatabase":
+        """Factory method to create instance with connected session"""
+        session = await (
             SessionBuilder()
             .known_nodes(nodes)
             .pool_size(30)
             .compression("lz4")
             .build()
         )
+        return cls(session)
 
-        self._tenant_stmts = {}
-        self._lock = threading.Lock()
-
-    def get_tenant_data(self, tenant_id, user_id):
+    async def get_tenant_data(self, tenant_id: int, user_id: int):
         """Get data for specific tenant"""
-        # Prepare statement per tenant for better caching
         stmt_key = f"get_user_{tenant_id}"
 
-        with self._lock:
+        async with self._lock:
             if stmt_key not in self._tenant_stmts:
-                self._tenant_stmts[stmt_key] = self.session.prepare(
+                self._tenant_stmts[stmt_key] = await self.session.prepare(
                     f"SELECT * FROM tenant_{tenant_id}.users WHERE id = ?"
-                ).set_idempotent(True)
+                )
 
         stmt = self._tenant_stmts[stmt_key]
-        result = self.session.execute_prepared(stmt, {"id": user_id})
+        result = await self.session.execute_prepared(stmt, {"id": user_id})
         return result.first_row()
 
-    def create_tenant_schema(self, tenant_id):
+    async def create_tenant_schema(self, tenant_id: int) -> None:
         """Create keyspace and tables for new tenant"""
         # Create tenant keyspace
-        self.session.execute(f"""
+        await self.session.execute(f"""
             CREATE KEYSPACE IF NOT EXISTS tenant_{tenant_id}
             WITH replication = {{
                 'class': 'NetworkTopologyStrategy',
@@ -49,10 +53,10 @@ class MultiTenantDatabase:
             }}
         """)
 
-        self.session.use_keyspace(f"tenant_{tenant_id}", False)
+        await self.session.use_keyspace(f"tenant_{tenant_id}", False)
 
         # Create tables
-        self.session.execute("""
+        await self.session.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id int PRIMARY KEY,
                 name text,
@@ -61,7 +65,7 @@ class MultiTenantDatabase:
             )
         """)
 
-        self.session.execute("""
+        await self.session.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 user_id int,
                 event_time timestamp,
@@ -71,35 +75,49 @@ class MultiTenantDatabase:
             ) WITH CLUSTERING ORDER BY (event_time DESC)
         """)
 
-        self.session.await_schema_agreement()
+        await self.session.await_schema_agreement()
+
 
 # Usage
-db = MultiTenantDatabase(["localhost:9042"])
+async def main():
+    db = await MultiTenantDatabase.create(["localhost:9042"])
 
-# Create tenant
-db.create_tenant_schema(1001)
+    # Create tenant
+    await db.create_tenant_schema(1001)
 
-# Access tenant data
-user = db.get_tenant_data(1001, 123)
+    # Access tenant data
+    user = await db.get_tenant_data(1001, 123)
+    print(user)
+
+
+asyncio.run(main())
 ```
 
 ## 2. Time Series Data
 
 ```python
-from rsylla import Session, Batch
-from datetime import datetime, timedelta
-import time
+import asyncio
+from rsylla import Session, SessionBuilder, Batch
+from datetime import datetime, date, timedelta
 
 class TimeSeriesStore:
     """Store and query time series data efficiently"""
 
-    def __init__(self, session):
+    def __init__(self, session: Session):
         self.session = session
-        self._setup_schema()
+        self._insert_stmt = None
+        self._query_stmt = None
 
-    def _setup_schema(self):
+    @classmethod
+    async def create(cls, session: Session) -> "TimeSeriesStore":
+        """Factory method with schema setup"""
+        store = cls(session)
+        await store._setup_schema()
+        return store
+
+    async def _setup_schema(self) -> None:
         """Create optimized time series table"""
-        self.session.execute("""
+        await self.session.execute("""
             CREATE TABLE IF NOT EXISTS metrics (
                 metric_name text,
                 bucket date,
@@ -115,131 +133,158 @@ class TimeSeriesStore:
             }
         """)
 
-        self.insert_stmt = self.session.prepare("""
+        # TTL embedded in query since it's not a bind parameter
+        self._insert_stmt = await self.session.prepare("""
             INSERT INTO metrics (metric_name, bucket, timestamp, value, tags)
             VALUES (?, ?, ?, ?, ?)
-            USING TTL ?
+            USING TTL 86400
         """)
 
-    def insert_metric(self, metric_name, value, tags=None, ttl_seconds=86400):
+        self._query_stmt = await self.session.prepare("""
+            SELECT timestamp, value, tags
+            FROM metrics
+            WHERE metric_name = ?
+            AND bucket = ?
+            AND timestamp >= ?
+            AND timestamp <= ?
+        """)
+
+    async def insert_metric(
+        self,
+        metric_name: str,
+        value: float,
+        tags: dict | None = None
+    ) -> None:
         """Insert a metric data point"""
         now = datetime.utcnow()
-        bucket = now.date()
+        bucket = (now.date() - date(1970, 1, 1)).days
         timestamp = int(now.timestamp() * 1000)
 
-        self.session.execute_prepared(self.insert_stmt, {
+        await self.session.execute_prepared(self._insert_stmt, {
             "metric_name": metric_name,
-            "bucket": (bucket - datetime(1970, 1, 1).date()).days,
+            "bucket": bucket,
             "timestamp": timestamp,
             "value": value,
-            "tags": tags or {},
-            "ttl": ttl_seconds
+            "tags": tags or {}
         })
 
-    def insert_batch(self, metrics):
+    async def insert_batch(self, metrics: list[tuple[str, float, dict | None]]) -> None:
         """Efficiently insert multiple metrics"""
-        # Group by bucket for optimal batching
-        by_bucket = {}
+        now = datetime.utcnow()
+        bucket = (now.date() - date(1970, 1, 1)).days
+        timestamp = int(now.timestamp() * 1000)
+
+        batch = Batch("unlogged")
+        values = []
 
         for metric_name, value, tags in metrics:
-            now = datetime.utcnow()
-            bucket = now.date()
-            bucket_days = (bucket - datetime(1970, 1, 1).date()).days
-
-            if bucket_days not in by_bucket:
-                by_bucket[bucket_days] = []
-
-            by_bucket[bucket_days].append({
+            batch.append_prepared(self._insert_stmt)
+            values.append({
                 "metric_name": metric_name,
-                "bucket": bucket_days,
-                "timestamp": int(now.timestamp() * 1000),
+                "bucket": bucket,
+                "timestamp": timestamp,
                 "value": value,
-                "tags": tags or {},
-                "ttl": 86400
+                "tags": tags or {}
             })
 
-        # Execute batches per bucket
-        for bucket_days, bucket_metrics in by_bucket.items():
-            batch = Batch("unlogged")
-            for _ in bucket_metrics:
-                batch.append_prepared(self.insert_stmt)
+        await self.session.batch(batch, values)
 
-            self.session.batch(batch, bucket_metrics)
-
-    def query_range(self, metric_name, start_time, end_time):
+    async def query_range(
+        self,
+        metric_name: str,
+        start_time: datetime,
+        end_time: datetime
+    ) -> list[dict]:
         """Query metrics in time range"""
-        # Calculate buckets to query
         start_date = start_time.date()
         end_date = end_time.date()
+        start_ts = int(start_time.timestamp() * 1000)
+        end_ts = int(end_time.timestamp() * 1000)
 
         all_results = []
         current_date = start_date
 
         while current_date <= end_date:
-            bucket_days = (current_date - datetime(1970, 1, 1).date()).days
+            bucket = (current_date - date(1970, 1, 1)).days
 
-            result = self.session.execute("""
-                SELECT timestamp, value, tags
-                FROM metrics
-                WHERE metric_name = ?
-                AND bucket = ?
-                AND timestamp >= ?
-                AND timestamp <= ?
-            """, {
+            result = await self.session.execute_prepared(self._query_stmt, {
                 "metric_name": metric_name,
-                "bucket": bucket_days,
-                "timestamp": int(start_time.timestamp() * 1000),
-                "timestamp": int(end_time.timestamp() * 1000)
+                "bucket": bucket,
+                "start_ts": start_ts,
+                "end_ts": end_ts
             })
 
-            all_results.extend(result.rows())
+            for row in result:
+                all_results.append({
+                    "timestamp": row[0],
+                    "value": row[1],
+                    "tags": row[2]
+                })
+
             current_date += timedelta(days=1)
 
         return all_results
 
+
 # Usage
-session = Session.connect(["localhost:9042"])
-session.use_keyspace("monitoring", False)
+async def main():
+    session = await Session.connect(["localhost:9042"])
+    await session.use_keyspace("monitoring", False)
 
-ts_store = TimeSeriesStore(session)
+    ts_store = await TimeSeriesStore.create(session)
 
-# Insert single metric
-ts_store.insert_metric("cpu.usage", 45.2, {"host": "server1", "region": "us-east"})
+    # Insert single metric
+    await ts_store.insert_metric(
+        "cpu.usage", 45.2, {"host": "server1", "region": "us-east"}
+    )
 
-# Insert batch
-metrics = [
-    ("cpu.usage", 45.2, {"host": "server1"}),
-    ("mem.usage", 78.5, {"host": "server1"}),
-    ("disk.usage", 62.1, {"host": "server1"}),
-]
-ts_store.insert_batch(metrics)
+    # Insert batch
+    metrics = [
+        ("cpu.usage", 45.2, {"host": "server1"}),
+        ("mem.usage", 78.5, {"host": "server1"}),
+        ("disk.usage", 62.1, {"host": "server1"}),
+    ]
+    await ts_store.insert_batch(metrics)
 
-# Query time range
-start = datetime.utcnow() - timedelta(hours=1)
-end = datetime.utcnow()
-results = ts_store.query_range("cpu.usage", start, end)
+    # Query time range
+    start = datetime.utcnow() - timedelta(hours=1)
+    end = datetime.utcnow()
+    results = await ts_store.query_range("cpu.usage", start, end)
 
-for row in results:
-    timestamp, value, tags = row.columns()
-    print(f"{timestamp}: {value} - {tags}")
+    for row in results:
+        print(f"{row['timestamp']}: {row['value']} - {row['tags']}")
+
+
+asyncio.run(main())
 ```
 
 ## 3. Event Sourcing
 
 ```python
-from rsylla import Session, Query
+import asyncio
 import json
+import time
 import uuid
+from rsylla import Session, SessionBuilder
 
 class EventStore:
     """Event sourcing implementation"""
 
-    def __init__(self, session):
+    def __init__(self, session: Session):
         self.session = session
-        self._setup_schema()
+        self._append_stmt = None
+        self._events_stmt = None
+        self._snapshot_stmt = None
 
-    def _setup_schema(self):
-        self.session.execute("""
+    @classmethod
+    async def create(cls, session: Session) -> "EventStore":
+        """Factory method with schema setup"""
+        store = cls(session)
+        await store._setup_schema()
+        return store
+
+    async def _setup_schema(self) -> None:
+        await self.session.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 aggregate_id uuid,
                 version int,
@@ -250,7 +295,7 @@ class EventStore:
             ) WITH CLUSTERING ORDER BY (version ASC)
         """)
 
-        self.session.execute("""
+        await self.session.execute("""
             CREATE TABLE IF NOT EXISTS snapshots (
                 aggregate_id uuid PRIMARY KEY,
                 version int,
@@ -259,17 +304,33 @@ class EventStore:
             )
         """)
 
-        self.append_event_stmt = self.session.prepare("""
+        self._append_stmt = await self.session.prepare("""
             INSERT INTO events (aggregate_id, version, event_type, event_data, timestamp)
             VALUES (?, ?, ?, ?, ?)
             IF NOT EXISTS
         """)
 
-    def append_event(self, aggregate_id, version, event_type, event_data):
-        """Append event with optimistic locking"""
-        import time
+        self._events_stmt = await self.session.prepare("""
+            SELECT version, event_type, event_data, timestamp
+            FROM events
+            WHERE aggregate_id = ?
+            AND version >= ?
+        """)
 
-        result = self.session.execute_prepared(self.append_event_stmt, {
+        self._snapshot_stmt = await self.session.prepare("""
+            INSERT INTO snapshots (aggregate_id, version, state, timestamp)
+            VALUES (?, ?, ?, ?)
+        """)
+
+    async def append_event(
+        self,
+        aggregate_id: str,
+        version: int,
+        event_type: str,
+        event_data: dict
+    ) -> bool:
+        """Append event with optimistic locking"""
+        result = await self.session.execute_prepared(self._append_stmt, {
             "aggregate_id": aggregate_id,
             "version": version,
             "event_type": event_type,
@@ -284,30 +345,27 @@ class EventStore:
         else:
             raise Exception(f"Version conflict for {aggregate_id} at version {version}")
 
-    def get_events(self, aggregate_id, from_version=0):
+    async def get_events(self, aggregate_id: str, from_version: int = 0) -> list[dict]:
         """Get all events for an aggregate"""
-        result = self.session.execute("""
-            SELECT version, event_type, event_data, timestamp
-            FROM events
-            WHERE aggregate_id = ?
-            AND version >= ?
-        """, {"aggregate_id": aggregate_id, "version": from_version})
+        result = await self.session.execute_prepared(self._events_stmt, {
+            "aggregate_id": aggregate_id,
+            "version": from_version
+        })
 
         events = []
         for row in result:
-            version, event_type, event_data, timestamp = row.columns()
             events.append({
-                "version": version,
-                "type": event_type,
-                "data": json.loads(event_data),
-                "timestamp": timestamp
+                "version": row[0],
+                "type": row[1],
+                "data": json.loads(row[2]),
+                "timestamp": row[3]
             })
 
         return events
 
-    def rebuild_aggregate(self, aggregate_id):
+    async def rebuild_aggregate(self, aggregate_id: str) -> dict:
         """Rebuild aggregate state from events"""
-        events = self.get_events(aggregate_id)
+        events = await self.get_events(aggregate_id)
 
         # Apply events to rebuild state
         state = {}
@@ -316,7 +374,7 @@ class EventStore:
 
         return state
 
-    def _apply_event(self, state, event):
+    def _apply_event(self, state: dict, event: dict) -> dict:
         """Apply event to state (domain-specific)"""
         # Example: account aggregate
         if event["type"] == "AccountCreated":
@@ -329,63 +387,77 @@ class EventStore:
 
         return state
 
-    def create_snapshot(self, aggregate_id, version, state):
+    async def create_snapshot(
+        self,
+        aggregate_id: str,
+        version: int,
+        state: dict
+    ) -> None:
         """Create snapshot for faster loading"""
-        import time
-
-        self.session.execute("""
-            INSERT INTO snapshots (aggregate_id, version, state, timestamp)
-            VALUES (?, ?, ?, ?)
-        """, {
+        await self.session.execute_prepared(self._snapshot_stmt, {
             "aggregate_id": aggregate_id,
             "version": version,
             "state": json.dumps(state),
             "timestamp": int(time.time() * 1000)
         })
 
+
 # Usage
-session = Session.connect(["localhost:9042"])
-session.use_keyspace("event_store", False)
+async def main():
+    session = await Session.connect(["localhost:9042"])
+    await session.use_keyspace("event_store", False)
 
-store = EventStore(session)
+    store = await EventStore.create(session)
 
-# Create account
-account_id = str(uuid.uuid4())
-store.append_event(account_id, 1, "AccountCreated", {
-    "owner": "Alice",
-    "initial_balance": 1000.0
-})
+    # Create account
+    account_id = str(uuid.uuid4())
+    await store.append_event(account_id, 1, "AccountCreated", {
+        "owner": "Alice",
+        "initial_balance": 1000.0
+    })
 
-# Deposit money
-store.append_event(account_id, 2, "MoneyDeposited", {
-    "amount": 500.0
-})
+    # Deposit money
+    await store.append_event(account_id, 2, "MoneyDeposited", {
+        "amount": 500.0
+    })
 
-# Withdraw money
-store.append_event(account_id, 3, "MoneyWithdrawn", {
-    "amount": 200.0
-})
+    # Withdraw money
+    await store.append_event(account_id, 3, "MoneyWithdrawn", {
+        "amount": 200.0
+    })
 
-# Rebuild state
-state = store.rebuild_aggregate(account_id)
-print(f"Account balance: {state['balance']}")  # 1300.0
+    # Rebuild state
+    state = await store.rebuild_aggregate(account_id)
+    print(f"Account balance: {state['balance']}")  # 1300.0
+
+
+asyncio.run(main())
 ```
 
 ## 4. Materialized Views Pattern
 
 ```python
-from rsylla import Session, Batch
+import asyncio
+import time
+import uuid
+from rsylla import Session, SessionBuilder, Batch
 
 class MaterializedViewManager:
     """Manage denormalized views"""
 
-    def __init__(self, session):
+    def __init__(self, session: Session):
         self.session = session
-        self._setup_schema()
 
-    def _setup_schema(self):
+    @classmethod
+    async def create(cls, session: Session) -> "MaterializedViewManager":
+        """Factory method with schema setup"""
+        manager = cls(session)
+        await manager._setup_schema()
+        return manager
+
+    async def _setup_schema(self) -> None:
         # Main table
-        self.session.execute("""
+        await self.session.execute("""
             CREATE TABLE IF NOT EXISTS posts (
                 post_id uuid PRIMARY KEY,
                 author_id int,
@@ -397,7 +469,7 @@ class MaterializedViewManager:
         """)
 
         # View by author
-        self.session.execute("""
+        await self.session.execute("""
             CREATE TABLE IF NOT EXISTS posts_by_author (
                 author_id int,
                 created_at timestamp,
@@ -408,7 +480,7 @@ class MaterializedViewManager:
         """)
 
         # View by tag
-        self.session.execute("""
+        await self.session.execute("""
             CREATE TABLE IF NOT EXISTS posts_by_tag (
                 tag text,
                 created_at timestamp,
@@ -419,9 +491,15 @@ class MaterializedViewManager:
             ) WITH CLUSTERING ORDER BY (created_at DESC)
         """)
 
-    def create_post(self, post_id, author_id, title, content, tags):
+    async def create_post(
+        self,
+        post_id: uuid.UUID,
+        author_id: int,
+        title: str,
+        content: str,
+        tags: set[str]
+    ) -> None:
         """Create post and update all views atomically"""
-        import time
         created_at = int(time.time() * 1000)
 
         # Create batch for atomic updates
@@ -439,7 +517,7 @@ class MaterializedViewManager:
             VALUES (?, ?, ?, ?)
         """)
 
-        # Update tag views
+        # Build values list - one dict per statement
         values = [
             {
                 "post_id": post_id,
@@ -472,74 +550,95 @@ class MaterializedViewManager:
             })
 
         # Execute batch
-        self.session.batch(batch, values)
+        await self.session.batch(batch, values)
 
-    def get_posts_by_author(self, author_id, limit=10):
+    async def get_posts_by_author(self, author_id: int, limit: int = 10) -> list:
         """Get posts by author"""
-        result = self.session.execute("""
+        result = await self.session.execute("""
             SELECT post_id, title, created_at
             FROM posts_by_author
             WHERE author_id = ?
             LIMIT ?
         """, {"author_id": author_id, "limit": limit})
 
-        return result.rows()
+        return list(result)
 
-    def get_posts_by_tag(self, tag, limit=10):
+    async def get_posts_by_tag(self, tag: str, limit: int = 10) -> list:
         """Get posts by tag"""
-        result = self.session.execute("""
+        result = await self.session.execute("""
             SELECT post_id, title, author_id, created_at
             FROM posts_by_tag
             WHERE tag = ?
             LIMIT ?
         """, {"tag": tag, "limit": limit})
 
-        return result.rows()
+        return list(result)
+
 
 # Usage
-session = Session.connect(["localhost:9042"])
-session.use_keyspace("blog", False)
+async def main():
+    session = await Session.connect(["localhost:9042"])
+    await session.use_keyspace("blog", False)
 
-manager = MaterializedViewManager(session)
+    manager = await MaterializedViewManager.create(session)
 
-# Create post (updates all views atomically)
-import uuid
-post_id = uuid.uuid4()
-manager.create_post(
-    post_id=post_id,
-    author_id=123,
-    title="My First Post",
-    content="This is the content...",
-    tags=["python", "database", "scylla"]
-)
+    # Create post (updates all views atomically)
+    post_id = uuid.uuid4()
+    await manager.create_post(
+        post_id=post_id,
+        author_id=123,
+        title="My First Post",
+        content="This is the content...",
+        tags={"python", "database", "scylla"}
+    )
 
-# Query by author
-author_posts = manager.get_posts_by_author(123)
-for row in author_posts:
-    print(f"Post: {row[1]}")
+    # Query by author
+    author_posts = await manager.get_posts_by_author(123)
+    for row in author_posts:
+        print(f"Post: {row[1]}")
 
-# Query by tag
-python_posts = manager.get_posts_by_tag("python")
-for row in python_posts:
-    print(f"Post: {row[1]} by {row[2]}")
+    # Query by tag
+    python_posts = await manager.get_posts_by_tag("python")
+    for row in python_posts:
+        print(f"Post: {row[1]} by {row[2]}")
+
+
+asyncio.run(main())
 ```
 
 ## 5. Caching Layer
 
 ```python
-from rsylla import Session
+import asyncio
+import pickle
+import time
 from datetime import datetime, timedelta
+from rsylla import Session, SessionBuilder
 
 class CacheLayer:
     """Two-level cache with ScyllaDB"""
 
-    def __init__(self, session):
+    def __init__(self, session: Session, memory_ttl_seconds: int = 300):
         self.session = session
-        self._memory_cache = {}
-        self._setup_schema()
+        self._memory_cache: dict = {}
+        self._memory_ttl = memory_ttl_seconds
+        self._get_stmt = None
+        self._set_stmt = None
+        self._del_stmt = None
 
-    def _setup_schema(self):
-        self.session.execute("""
+    @classmethod
+    async def create(
+        cls,
+        session: Session,
+        memory_ttl_seconds: int = 300
+    ) -> "CacheLayer":
+        """Factory method with schema setup"""
+        cache = cls(session, memory_ttl_seconds)
+        await cache._setup_schema()
+        return cache
+
+    async def _setup_schema(self) -> None:
+        await self.session.execute("""
             CREATE TABLE IF NOT EXISTS cache (
                 key text PRIMARY KEY,
                 value blob,
@@ -547,15 +646,20 @@ class CacheLayer:
             )
         """)
 
-        self.get_stmt = self.session.prepare(
+        self._get_stmt = await self.session.prepare(
             "SELECT value FROM cache WHERE key = ?"
-        ).set_idempotent(True)
-
-        self.set_stmt = self.session.prepare(
-            "INSERT INTO cache (key, value, created_at) VALUES (?, ?, ?) USING TTL ?"
         )
 
-    def get(self, key):
+        # Default TTL of 1 hour
+        self._set_stmt = await self.session.prepare(
+            "INSERT INTO cache (key, value, created_at) VALUES (?, ?, ?) USING TTL 3600"
+        )
+
+        self._del_stmt = await self.session.prepare(
+            "DELETE FROM cache WHERE key = ?"
+        )
+
+    async def get(self, key: str):
         """Get value from cache (memory -> scylla)"""
         # Check memory cache first
         if key in self._memory_cache:
@@ -566,81 +670,99 @@ class CacheLayer:
                 del self._memory_cache[key]
 
         # Check ScyllaDB
-        result = self.session.execute_prepared(self.get_stmt, {"key": key})
+        result = await self.session.execute_prepared(self._get_stmt, {"key": key})
         row = result.first_row()
 
         if row:
-            value = row[0]
+            value = pickle.loads(row[0])
             # Update memory cache
-            self._memory_cache[key] = (value, datetime.now() + timedelta(minutes=5))
+            self._memory_cache[key] = (
+                value,
+                datetime.now() + timedelta(seconds=self._memory_ttl)
+            )
             return value
 
         return None
 
-    def set(self, key, value, ttl_seconds=3600):
+    async def set(self, key: str, value, ttl_seconds: int = 3600) -> None:
         """Set value in cache"""
-        import time
-        import pickle
-
         # Serialize value
         serialized = pickle.dumps(value)
 
         # Store in ScyllaDB with TTL
-        self.session.execute_prepared(self.set_stmt, {
+        # Note: For dynamic TTL, you'd need separate prepared statements
+        await self.session.execute_prepared(self._set_stmt, {
             "key": key,
             "value": serialized,
-            "created_at": int(time.time() * 1000),
-            "ttl": ttl_seconds
+            "created_at": int(time.time() * 1000)
         })
 
         # Update memory cache
+        memory_ttl = min(ttl_seconds, self._memory_ttl)
         self._memory_cache[key] = (
             value,
-            datetime.now() + timedelta(seconds=min(ttl_seconds, 300))
+            datetime.now() + timedelta(seconds=memory_ttl)
         )
 
-    def delete(self, key):
+    async def delete(self, key: str) -> None:
         """Delete from cache"""
-        self.session.execute(
-            "DELETE FROM cache WHERE key = ?",
-            {"key": key}
-        )
+        await self.session.execute_prepared(self._del_stmt, {"key": key})
 
         if key in self._memory_cache:
             del self._memory_cache[key]
 
+
 # Usage
-session = Session.connect(["localhost:9042"])
-session.use_keyspace("cache", False)
+async def main():
+    session = await Session.connect(["localhost:9042"])
+    await session.use_keyspace("cache", False)
 
-cache = CacheLayer(session)
+    cache = await CacheLayer.create(session)
 
-# Set value
-cache.set("user:123", {"name": "Alice", "email": "alice@example.com"}, ttl_seconds=3600)
+    # Set value
+    await cache.set(
+        "user:123",
+        {"name": "Alice", "email": "alice@example.com"},
+        ttl_seconds=3600
+    )
 
-# Get value (from memory cache on second call)
-user_data = cache.get("user:123")
-print(user_data)
+    # Get value (from memory cache on second call)
+    user_data = await cache.get("user:123")
+    print(user_data)
 
-# Delete
-cache.delete("user:123")
+    # Delete
+    await cache.delete("user:123")
+
+
+asyncio.run(main())
 ```
 
 ## 6. Rate Limiting
 
 ```python
-from rsylla import Session
+import asyncio
 import time
+from rsylla import Session, SessionBuilder
 
 class RateLimiter:
     """Token bucket rate limiter using ScyllaDB counters"""
 
-    def __init__(self, session):
+    def __init__(self, session: Session):
         self.session = session
-        self._setup_schema()
+        self._config_get_stmt = None
+        self._config_set_stmt = None
+        self._count_get_stmt = None
+        self._count_incr_stmt = None
 
-    def _setup_schema(self):
-        self.session.execute("""
+    @classmethod
+    async def create(cls, session: Session) -> "RateLimiter":
+        """Factory method with schema setup"""
+        limiter = cls(session)
+        await limiter._setup_schema()
+        return limiter
+
+    async def _setup_schema(self) -> None:
+        await self.session.execute("""
             CREATE TABLE IF NOT EXISTS rate_limits (
                 identifier text,
                 bucket_time bigint,
@@ -649,7 +771,7 @@ class RateLimiter:
             )
         """)
 
-        self.session.execute("""
+        await self.session.execute("""
             CREATE TABLE IF NOT EXISTS rate_limit_config (
                 identifier text PRIMARY KEY,
                 max_tokens int,
@@ -658,45 +780,71 @@ class RateLimiter:
             )
         """)
 
-    def configure(self, identifier, max_tokens, refill_rate, bucket_size_seconds=60):
-        """Configure rate limit for identifier"""
-        self.session.execute("""
+        self._config_get_stmt = await self.session.prepare("""
+            SELECT max_tokens, bucket_size_seconds
+            FROM rate_limit_config
+            WHERE identifier = ?
+        """)
+
+        self._config_set_stmt = await self.session.prepare("""
             INSERT INTO rate_limit_config
             (identifier, max_tokens, refill_rate, bucket_size_seconds)
             VALUES (?, ?, ?, ?)
-        """, {
+        """)
+
+        self._count_get_stmt = await self.session.prepare("""
+            SELECT tokens
+            FROM rate_limits
+            WHERE identifier = ?
+            AND bucket_time = ?
+        """)
+
+        self._count_incr_stmt = await self.session.prepare("""
+            UPDATE rate_limits
+            SET tokens = tokens + ?
+            WHERE identifier = ?
+            AND bucket_time = ?
+        """)
+
+    async def configure(
+        self,
+        identifier: str,
+        max_tokens: int,
+        refill_rate: int,
+        bucket_size_seconds: int = 60
+    ) -> None:
+        """Configure rate limit for identifier"""
+        await self.session.execute_prepared(self._config_set_stmt, {
             "identifier": identifier,
             "max_tokens": max_tokens,
             "refill_rate": refill_rate,
             "bucket_size_seconds": bucket_size_seconds
         })
 
-    def check_rate_limit(self, identifier, tokens_needed=1):
+    async def check_rate_limit(self, identifier: str, tokens_needed: int = 1) -> bool:
         """Check if request is allowed"""
         # Get configuration
-        config_result = self.session.execute("""
-            SELECT max_tokens, bucket_size_seconds
-            FROM rate_limit_config
-            WHERE identifier = ?
-        """, {"identifier": identifier})
+        config_result = await self.session.execute_prepared(
+            self._config_get_stmt,
+            {"identifier": identifier}
+        )
 
         config = config_result.first_row()
         if not config:
             return True  # No limit configured
 
-        max_tokens, bucket_size = config.columns()
+        max_tokens = config[0]
+        bucket_size = config[1]
 
         # Calculate current bucket
         current_time = int(time.time())
         bucket_time = (current_time // bucket_size) * bucket_size
 
         # Get current token count
-        count_result = self.session.execute("""
-            SELECT tokens
-            FROM rate_limits
-            WHERE identifier = ?
-            AND bucket_time = ?
-        """, {"identifier": identifier, "bucket_time": bucket_time})
+        count_result = await self.session.execute_prepared(self._count_get_stmt, {
+            "identifier": identifier,
+            "bucket_time": bucket_time
+        })
 
         current_tokens = 0
         row = count_result.first_row()
@@ -705,12 +853,7 @@ class RateLimiter:
 
         if current_tokens + tokens_needed <= max_tokens:
             # Allow request and increment counter
-            self.session.execute("""
-                UPDATE rate_limits
-                SET tokens = tokens + ?
-                WHERE identifier = ?
-                AND bucket_time = ?
-            """, {
+            await self.session.execute_prepared(self._count_incr_stmt, {
                 "tokens": tokens_needed,
                 "identifier": identifier,
                 "bucket_time": bucket_time
@@ -719,22 +862,32 @@ class RateLimiter:
         else:
             return False  # Rate limit exceeded
 
+
 # Usage
-session = Session.connect(["localhost:9042"])
-session.use_keyspace("rate_limiting", False)
+async def main():
+    session = await Session.connect(["localhost:9042"])
+    await session.use_keyspace("rate_limiting", False)
 
-limiter = RateLimiter(session)
+    limiter = await RateLimiter.create(session)
 
-# Configure: max 100 requests per 60 seconds
-limiter.configure("api:user:123", max_tokens=100, refill_rate=100, bucket_size_seconds=60)
+    # Configure: max 100 requests per 60 seconds
+    await limiter.configure(
+        "api:user:123",
+        max_tokens=100,
+        refill_rate=100,
+        bucket_size_seconds=60
+    )
 
-# Check rate limit
-if limiter.check_rate_limit("api:user:123"):
-    print("Request allowed")
-    # Process request
-else:
-    print("Rate limit exceeded")
-    # Return 429 error
+    # Check rate limit
+    if await limiter.check_rate_limit("api:user:123"):
+        print("Request allowed")
+        # Process request
+    else:
+        print("Rate limit exceeded")
+        # Return 429 error
+
+
+asyncio.run(main())
 ```
 
 These patterns demonstrate real-world use cases and show how to effectively use rsylla for complex applications.
